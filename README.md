@@ -8,6 +8,7 @@ It has no dependency on the `uagent` application. `cryptography` is required;
 `python-keyring` is optional and only needed when using an OS keyring backend.
 
 - [API reference](docs/API.md)
+- [Behavior and security specification](docs/SPEC.md)
 - [Changelog](CHANGELOG.md)
 
 ## Install
