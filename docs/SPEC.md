@@ -70,7 +70,7 @@ Changing or removing the v1 prefix therefore causes authentication to fail. Unkn
 
 ### 4.1 Key material and file storage
 
-A master key MUST contain exactly 32 random bytes. File-backed keys are stored as those raw bytes, not as Base64 text. The default key file is:
+A generated master key is 32 random bytes. A key accepted from storage MUST contain exactly 32 bytes; the library does not assess the randomness of a caller-supplied key file. File-backed keys are stored as those raw bytes, not as Base64 text. The default key file is:
 
 ```text
 ~/.uag/uag_envsec_key
