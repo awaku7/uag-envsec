@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uag-envsec"
+version = "0.1.0"
+description = "Standalone encrypted environment-file and key-management helpers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+  { name = "Hirofumi Ukawa", email = "hirofumi@ukawa.biz" },
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Security :: Cryptography",
+]
+dependencies = [
+  "cryptography>=44.0.2",
+]
+
+[project.optional-dependencies]
+keyring = ["keyring>=25.0.0"]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+uag_envsec = "uag_envsec.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["uag_envsec", "uag_envsec.*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
