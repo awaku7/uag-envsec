@@ -1,6 +1,6 @@
 # uag-envsec Specification
 
-**Status:** Current behavior specification for `uag-envsec` 0.1.0\
+**Status:** Current behavior specification for `uag-envsec` 0.1.1\
 **Normative source:** This document describes the released behavior. If behavior changes, update this document, the API reference, and tests in the same change.
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** express requirements for conforming implementations of this version.
@@ -21,15 +21,23 @@ The public Python API is the set exported by `uag_envsec.__init__`. The CLI and 
 
 ## 2. Functional requirements
 
-An implementation conforming to version 0.1.0:
+An implementation conforming to version 0.1.1:
 
 1. MUST encrypt and authenticate text using AES-GCM and MUST reject ciphertext that cannot be authenticated with the selected key.
+
 1. MUST read both supported ciphertext envelopes, v0 and v1. New encryption MUST default to v1. Callers MAY request v0 for compatibility with older `uag` releases.
+
 1. MUST preserve input files during file encryption, decryption, migration, and rekeying. These operations write to a distinct output path; an explicit output resolving to the source MUST be rejected.
+
 1. MUST refuse to replace an existing output by default. An explicit overwrite option MAY replace the destination, but MUST NOT replace the source file.
+
 1. MUST NOT print or return plaintext from the inspect operation. The Python text decryption API returns plaintext to its caller; the file API writes it to the requested output.
+
 1. MUST keep encryption keys separate from ciphertext and MUST NOT silently fall back to a file key after an ambiguous OS-keyring error or timeout.
+
 1. MUST avoid creating a plaintext intermediate file for encryption, migration, or rekeying. The implementation processes text in memory; it does not promise secure erasure of process memory.
+
+1. MUST encrypt dotenv assignment values individually by default in the CLI and file API, leaving variable names, comments, and blank lines visible; other non-assignment lines MUST be rejected. This representation MUST identify itself with a header, MUST authenticate each value together with its variable name, and MUST reject mixed unencrypted assignments and unsupported multiline values rather than partially encrypting them. Callers MAY explicitly select whole-file encryption for compatibility with consumers that expect a single ciphertext.
 
 ## 3. Ciphertext envelope
 
@@ -66,6 +74,21 @@ Changing or removing the v1 prefix therefore causes authentication to fail. Unkn
 
 `detect_format_version()` returns `0` for unversioned data and `1` for a recognized v1 envelope. Ciphertext with an unrecognized numeric version raises `UnsupportedCiphertextVersionError`; malformed version markers raise `ValueError`. Decryption also rejects decoded payloads shorter than the 12-byte nonce plus 16-byte authentication tag, Base64 decoding errors, invalid UTF-8 plaintext, or authentication failure.
 
+### 3.5 Values-only dotenv representation
+
+The optional values-only mode starts with the clear-text comment header
+`# uag-envsec:values-only:v1;format=N`, followed by a line ending, where `N`
+is the envelope version (`0` or `1`). For each supported one-line dotenv
+assignment, the variable name and assignment prefix remain visible and the raw
+right-hand side is replaced by `uag-envsec-value:` followed by a normal v0 or
+v1 ciphertext. The encrypted plaintext is `variable-name || NUL || raw-value`,
+which makes moving a ciphertext under a different variable name fail
+validation. Comments and blank lines remain unchanged; other non-assignment lines are rejected. The raw
+right-hand side is encrypted as-is, so quotes, whitespace, and inline comments
+after `=` are encrypted too. Multiline quoted values and values ending in an unescaped backslash are
+rejected. A values-only file with an assignment lacking its ciphertext
+marker MUST be rejected during decryption/inspection.
+
 ## 4. Key management
 
 ### 4.1 Key material and file storage
@@ -96,7 +119,7 @@ All file APIs accept UTF-8 text files and keep the source unchanged. File conten
 
 | Operation | Default destination | Source modified? | Default overwrite behavior |
 |---|---|---:|---|
-| `encrypt_file` | `<source>.sec` | No | Refuse existing destination |
+| `encrypt_file` | `<source>.sec` | No | Refuse existing destination (values-only by default; whole-file is explicit) |
 | `decrypt_file` | `<source>.decrypted` | No | Refuse existing destination |
 | `migrate_file` | `<source>.v<target-version>` | No | Refuse existing destination |
 | `rekey_file` | `<source>.rekeyed` | No | Refuse existing destination |
@@ -109,22 +132,22 @@ The executable is `uag_envsec`. A command-specific failure is reported on standa
 
 | Form | Purpose and defaults |
 |---|---|
-| `uag_envsec [PATH] [--output PATH] [--key-file PATH] [--force] [--format-version 0\|1]` | Encrypt a file. `PATH` defaults to `.env`; output defaults to `<PATH>.sec`; format defaults to v1. `uag_envsec encrypt ...` is an equivalent explicit form. |
-| `uag_envsec decrypt --file PATH [--output PATH] [--key-file PATH] [--force]` | Decrypt to `<PATH>.decrypted` by default. |
-| `uag_envsec inspect --file PATH [--key-file PATH]` | Report format version, ciphertext byte count, authentication, and decryptability; never print plaintext. |
+| `uag_envsec [PATH] [--output PATH] [--key-file PATH] [--force] [--format-version 0\|1] [--values-only|--whole-file]` | Encrypt a file. `PATH` defaults to `.env`; output defaults to `<PATH>.sec`; format defaults to v1. Values-only encryption is the default; `--whole-file` selects whole-file encryption, and `--values-only` explicitly selects the default mode. `uag_envsec encrypt ...` is an equivalent explicit form. |
+| `uag_envsec decrypt --file PATH [--output PATH] [--key-file PATH] [--force]` | Decrypt whole-file ciphertext or automatically detect/decrypt values-only files to `<PATH>.decrypted` by default. |
+| `uag_envsec inspect --file PATH [--key-file PATH]` | Report format version, ciphertext byte count, authentication, and decryptability; values-only mode also reports mode and encrypted assignment count. Never print plaintext. |
 | `uag_envsec add [--file PATH] [--output PATH] [--key-file PATH] [--key NAME] [--value VALUE] [--force] [--format-version 0\|1]` | Add or update a dotenv variable. Input defaults to `.env.sec`; output defaults to the input, so the encrypted file is updated in place. If `--value` is omitted, the value is requested with echo disabled. If both key and value are omitted, the command prompts for both. |
 | `uag_envsec delete --key NAME [--file PATH] [--output PATH] [--key-file PATH] [--force] [--format-version 0\|1]` | Remove matching variable assignment lines. Input defaults to `.env.sec`; output defaults to the input. A missing variable is an error. |
 | `uag_envsec migrate --file PATH [--to 0\|1] [--output PATH] [--key-file PATH] [--force]` | Migrate envelope version. `--to` also accepts `--format-version`; the target defaults to v1. The input is preserved. |
 | `uag_envsec rekey --file PATH --new-key-file PATH [--old-key-file PATH] [--output PATH] [--format-version 0\|1] [--force]` | Re-encrypt under a different key. The CLI creates the new key file if necessary; the Python `rekey_*` APIs require it to exist. The input is preserved. |
 
-Environment variable names handled by `add` and `delete` MUST match `[A-Za-z_][A-Za-z0-9_]*`. `add` replaces the first matching assignment or appends a new assignment. `delete` removes matching assignment lines and fails when none are found. Both operations write v1 by default and can be directed to v0 for legacy compatibility.
+Environment variable names handled by `add` and `delete` MUST match `[A-Za-z_][A-Za-z0-9_]*`. `add` replaces the first matching assignment or appends a new assignment. `delete` removes matching assignment lines and fails when none are found. Both operations write v1 by default and can be directed to v0 for legacy compatibility. When the source uses values-only mode, `add` and `delete` preserve that representation. `migrate_file` and `rekey_file` also detect values-only inputs and retain that representation while updating the envelope version or key.
 
 ## 7. Public Python API
 
 The exported API includes text and file encrypt/decrypt operations, format detection, inspection, migration, rekeying, and key management. Its canonical names are:
 
-- `encrypt_text`, `decrypt_text`, `detect_format_version`
-- `encrypt_file`, `decrypt_file`, `inspect_file`
+- `encrypt_text`, `decrypt_text`, `encrypt_env_values`, `decrypt_env_values`, `detect_format_version`
+- `encrypt_file` (including `values_only=True`), `decrypt_file`, `inspect_file`
 - `migrate_text`, `migrate_file`, `rekey_text`, `rekey_file`
 - `ensure_key_file`, `save_key`, `load_key`, `migrate_key_file_to_keyring`
 
@@ -133,6 +156,7 @@ The API MUST NOT log or print key bytes. `decrypt_text()` returns plaintext to i
 ## 8. Security properties and limitations
 
 - AES-GCM provides confidentiality and authentication when the master key remains secret and nonce generation is secure. Anyone holding the key can decrypt the data.
+- In values-only mode, variable names, comments, and the presence of variables remain visible; only assignment right-hand sides are secret. Variable names are bound to their ciphertext, but comments and overall line ordering are not authenticated.
 - The format does not provide password protection, key escrow, multi-key identifiers, rollback detection, or automatic rotation of all files.
 - Encryption, decryption, inspection, add/delete, migration, and rekeying process content in memory. Python and the operating system do not guarantee secure erasure of those memory copies.
 - Atomic output replacement reduces partial-file exposure but is not a substitute for backups, filesystem security, or safe handling of plaintext after decryption.
@@ -140,6 +164,6 @@ The API MUST NOT log or print key bytes. `decrypt_text()` returns plaintext to i
 
 ## 9. Compatibility and conformance
 
-Version 0.1.0 MUST remain able to read supported v0 and v1 envelopes. Version 0 output is the compatibility format for older `uag` releases; version 1 is the default for newly written ciphertext. Any future incompatible envelope MUST use a new explicit version and MUST NOT be silently interpreted as v0.
+Version 0.1.1 MUST remain able to read supported v0 and v1 envelopes. Version 0 output is the compatibility format for older `uag` releases; version 1 is the default for newly written ciphertext. Any future incompatible envelope MUST use a new explicit version and MUST NOT be silently interpreted as v0.
 
 A release conforms to this specification when its exported API and CLI behavior match this document and the automated tests cover the cryptographic formats, key-backend failure behavior, source preservation, overwrite protections, and supported migration paths. The package's CI additionally builds and validates wheel and source distributions.

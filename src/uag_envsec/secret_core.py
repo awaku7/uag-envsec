@@ -28,6 +28,11 @@ KEYRING_TIMEOUT_SECONDS: Final[float] = 3.0
 LEGACY_FORMAT_VERSION: Final[int] = 0
 CURRENT_FORMAT_VERSION: Final[int] = 1
 _VERSIONED_CIPHERTEXT_PREFIX: Final[str] = "uag-envsec:v"
+_VALUES_ONLY_HEADER: Final[str] = "# uag-envsec:values-only:v1;format="
+_VALUE_CIPHERTEXT_PREFIX: Final[str] = "uag-envsec-value:"
+_ENV_ASSIGNMENT_RE = re.compile(
+    r"^(?P<prefix>[ \t]*(?:export[ \t]+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*=)(?P<value>.*)$"
+)
 _KEYRING_TIMED_OUT = False
 
 
@@ -509,6 +514,146 @@ def decrypt_text(enc_b64: str, *, key_path: str | Path | None = None) -> str:
     return _decrypt_text_with_key(enc_b64, load_key(key_path))
 
 
+def _values_only_header(text: str) -> tuple[int, int] | None:
+    """Return (envelope version, header length) for a values-only env file."""
+    if not text.startswith("# uag-envsec:values-only:"):
+        return None
+    match = re.match(
+        r"\A# uag-envsec:values-only:v1;format=([0-9]+)(?:\r\n|\n|\r|\Z)",
+        text,
+    )
+    if match is None:
+        raise ValueError("Malformed values-only envsec header")
+    version = int(match.group(1))
+    _validate_format_version(version)
+    return version, match.end()
+
+
+def _split_line_ending(line: str) -> tuple[str, str]:
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith(("\n", "\r")):
+        return line[:-1], line[-1:]
+    return line, ""
+
+
+def _reject_multiline_value(value: str, *, line_number: int) -> None:
+    """Fail closed for dotenv values whose continuation would span lines."""
+    stripped = value.lstrip(" \t")
+    if stripped.startswith(("'", '"')):
+        quote = stripped[0]
+        escaped = False
+        closed = False
+        for char in stripped[1:]:
+            if quote == '"' and char == "\\" and not escaped:
+                escaped = True
+                continue
+            if char == quote and not escaped:
+                closed = True
+                break
+            escaped = False
+        if not closed:
+            raise ValueError(
+                f"Multiline quoted dotenv values are not supported (line {line_number})"
+            )
+
+    trailing_backslashes = len(value) - len(value.rstrip("\\"))
+    if trailing_backslashes % 2:
+        raise ValueError(
+            f"Values ending in an unescaped backslash are not supported (line {line_number})"
+        )
+
+
+def encrypt_env_values(
+    plaintext: str,
+    *,
+    key_path: str | Path | None = None,
+    format_version: int = CURRENT_FORMAT_VERSION,
+) -> str:
+    """Encrypt dotenv assignment values while leaving keys and comments visible.
+
+    Each assignment's raw right-hand side is authenticated together with its
+    variable name. The file receives a comment header so decrypt/inspect and
+    file-management operations can identify this representation reliably.
+    """
+    version = _validate_format_version(format_version)
+    if _values_only_header(plaintext) is not None:
+        raise ValueError("Input is already a values-only envsec file")
+    master_key = load_key(key_path)
+    encrypted_lines: list[str] = []
+    for line_number, line in enumerate(plaintext.splitlines(keepends=True), start=1):
+        body, ending = _split_line_ending(line)
+        match = _ENV_ASSIGNMENT_RE.fullmatch(body)
+        if match is None:
+            if not body.strip() or body.lstrip(" \t").startswith("#"):
+                encrypted_lines.append(line)
+                continue
+            raise ValueError(
+                f"Unsupported non-assignment dotenv line (line {line_number})"
+            )
+        value = match.group("value")
+        _reject_multiline_value(value, line_number=line_number)
+        bound_value = f"{match.group('key')}\0{value}"
+        ciphertext = _encrypt_text_with_key(bound_value, master_key, version)
+        encrypted_lines.append(
+            f"{match.group('prefix')}{_VALUE_CIPHERTEXT_PREFIX}{ciphertext}{ending}"
+        )
+
+    return f"{_VALUES_ONLY_HEADER}{version}\n" + "".join(encrypted_lines)
+
+
+def _decrypt_env_values_with_key(
+    ciphertext: str,
+    master_key: bytes,
+) -> tuple[str, int, int]:
+    header = _values_only_header(ciphertext)
+    if header is None:
+        raise ValueError("Input is not a values-only envsec file")
+    header_version, header_length = header
+    plaintext_lines: list[str] = []
+    encrypted_count = 0
+    for line_number, line in enumerate(
+        ciphertext[header_length:].splitlines(keepends=True), start=2
+    ):
+        body, ending = _split_line_ending(line)
+        match = _ENV_ASSIGNMENT_RE.fullmatch(body)
+        if match is None:
+            if not body.strip() or body.lstrip(" \t").startswith("#"):
+                plaintext_lines.append(line)
+                continue
+            raise ValueError(
+                f"Unsupported non-assignment line in values-only envsec file (line {line_number})"
+            )
+        value = match.group("value")
+        if not value.startswith(_VALUE_CIPHERTEXT_PREFIX):
+            raise ValueError(
+                f"Unencrypted assignment in values-only envsec file (line {line_number})"
+            )
+        encrypted_value = value[len(_VALUE_CIPHERTEXT_PREFIX) :]
+        value_version = detect_format_version(encrypted_value)
+        if value_version != header_version:
+            raise ValueError("Values-only header and encrypted value versions differ")
+        bound_value = _decrypt_text_with_key(encrypted_value, master_key)
+        key, separator, original_value = bound_value.partition("\0")
+        if not separator or key != match.group("key"):
+            raise ValueError(
+                f"Encrypted value does not match its environment variable (line {line_number})"
+            )
+        plaintext_lines.append(f"{match.group('prefix')}{original_value}{ending}")
+        encrypted_count += 1
+    return "".join(plaintext_lines), header_version, encrypted_count
+
+
+def decrypt_env_values(
+    ciphertext: str,
+    *,
+    key_path: str | Path | None = None,
+) -> str:
+    """Decrypt a values-only envsec representation back to its original text."""
+    plaintext, _, _ = _decrypt_env_values_with_key(ciphertext, load_key(key_path))
+    return plaintext
+
+
 def migrate_text(
     ciphertext: str,
     *,
@@ -579,15 +724,26 @@ def migrate_file(
         trailing_newline = "\r"
     else:
         trailing_newline = ""
-    ciphertext = raw_text.strip()
-    migrated = migrate_text(
-        ciphertext,
-        target_version=target_version,
-        key_path=key_path,
-    )
-
-    if output_path is None and detect_format_version(ciphertext) == target_version:
-        return source
+    values_only = _values_only_header(raw_text) is not None
+    if values_only:
+        plaintext, source_version, _ = _decrypt_env_values_with_key(
+            raw_text, load_key(key_path)
+        )
+        if output_path is None and source_version == target_version:
+            return source
+        migrated = encrypt_env_values(
+            plaintext, key_path=key_path, format_version=target_version
+        )
+        trailing_newline = ""
+    else:
+        ciphertext = raw_text.strip()
+        migrated = migrate_text(
+            ciphertext,
+            target_version=target_version,
+            key_path=key_path,
+        )
+        if output_path is None and detect_format_version(ciphertext) == target_version:
+            return source
     destination = (
         Path(output_path)
         if output_path is not None
@@ -642,12 +798,26 @@ def rekey_file(
     else:
         trailing_newline = ""
 
-    rekeyed = rekey_text(
-        raw_text.strip(),
-        new_key_path=new_key_path,
-        old_key_path=old_key_path,
-        format_version=format_version,
-    )
+    if _values_only_header(raw_text) is not None:
+        target_version = _validate_format_version(format_version)
+        old_key = load_key(old_key_path)
+        new_key = load_key(new_key_path)
+        if secrets.compare_digest(old_key, new_key):
+            raise ValueError("New key must differ from the source key")
+        plaintext, _, _ = _decrypt_env_values_with_key(raw_text, old_key)
+        rekeyed = encrypt_env_values(
+            plaintext,
+            key_path=new_key_path,
+            format_version=target_version,
+        )
+        trailing_newline = ""
+    else:
+        rekeyed = rekey_text(
+            raw_text.strip(),
+            new_key_path=new_key_path,
+            old_key_path=old_key_path,
+            format_version=format_version,
+        )
     _write_private_text_atomic(
         destination,
         rekeyed + trailing_newline,
@@ -699,11 +869,14 @@ def encrypt_file(
     output_path: str | Path | None = None,
     format_version: int = CURRENT_FORMAT_VERSION,
     overwrite: bool = False,
+    values_only: bool = True,
 ) -> Path:
     """Encrypt a UTF-8 text file, leaving its plaintext source untouched.
 
-    By default the destination is ``<source>.sec``. Existing outputs are not
-    overwritten unless requested; ciphertext is written atomically.
+    By default, dotenv assignment values are encrypted individually and the
+    destination is ``<source>.sec``. Set ``values_only=False`` to encrypt the
+    whole file as one ciphertext. Existing outputs are not overwritten unless
+    requested; ciphertext is written atomically.
     """
     source = Path(source_path)
     if not source.is_file():
@@ -720,11 +893,18 @@ def encrypt_file(
         raise FileExistsError(f"Encrypted output already exists: {destination}")
 
     plaintext = source.read_bytes().decode("utf-8")
-    ciphertext = encrypt_text(
-        plaintext,
-        key_path=key_path,
-        format_version=format_version,
-    )
+    if values_only:
+        ciphertext = encrypt_env_values(
+            plaintext,
+            key_path=key_path,
+            format_version=format_version,
+        )
+    else:
+        ciphertext = encrypt_text(
+            plaintext,
+            key_path=key_path,
+            format_version=format_version,
+        )
     _write_private_text_atomic(destination, ciphertext, overwrite=overwrite)
     return destination
 
@@ -756,8 +936,13 @@ def decrypt_file(
     if destination.exists() and not overwrite:
         raise FileExistsError(f"Decrypted output already exists: {destination}")
 
-    ciphertext = source.read_bytes().decode("utf-8").strip()
-    plaintext = decrypt_text(ciphertext, key_path=key_path)
+    raw_text = source.read_bytes().decode("utf-8")
+    if _values_only_header(raw_text) is not None:
+        ciphertext = raw_text
+        plaintext = decrypt_env_values(ciphertext, key_path=key_path)
+    else:
+        ciphertext = raw_text.strip()
+        plaintext = decrypt_text(ciphertext, key_path=key_path)
     _write_private_text_atomic(destination, plaintext, overwrite=overwrite)
     return destination
 
@@ -766,16 +951,34 @@ def inspect_file(
     source_path: str | Path,
     *,
     key_path: str | Path | None = None,
-) -> dict[str, int | bool]:
+) -> dict[str, int | bool | str]:
     """Check ciphertext format and authenticated decryptability without outputting plaintext."""
     source = Path(source_path)
     if not source.is_file():
         raise FileNotFoundError(f"Encrypted input file not found: {source}")
 
     raw = source.read_bytes()
-    ciphertext = raw.decode("utf-8").strip()
-    version = detect_format_version(ciphertext)
+    raw_text = raw.decode("utf-8")
+    if _values_only_header(raw_text) is not None:
+        ciphertext = raw_text
+    else:
+        ciphertext = raw_text.strip()
     master_key = load_key(key_path)
+    header = _values_only_header(ciphertext)
+    if header is not None:
+        plaintext, version, encrypted_count = _decrypt_env_values_with_key(
+            ciphertext, master_key
+        )
+        del plaintext
+        return {
+            "format_version": version,
+            "ciphertext_bytes": len(raw),
+            "authenticated": True,
+            "decryptable": True,
+            "mode": "values-only",
+            "encrypted_values": encrypted_count,
+        }
+    version = detect_format_version(ciphertext)
     plaintext = _decrypt_text_with_key(ciphertext, master_key)
     del plaintext
     return {

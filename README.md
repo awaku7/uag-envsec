@@ -39,6 +39,25 @@ ciphertext = encrypt_text("API_TOKEN=example")
 plaintext = decrypt_text(ciphertext)
 ```
 
+`encrypt_file()` uses values-only encryption by default; set `values_only=False`
+to encrypt the entire file instead. The text helpers are also available directly:
+
+```python
+from uag_envsec import decrypt_env_values, encrypt_env_values, encrypt_file
+
+protected = encrypt_env_values("API_TOKEN=example\n")
+restored = decrypt_env_values(protected)
+encrypt_file(".env")  # values-only by default
+encrypt_file(".env", values_only=False)  # encrypt the whole file
+```
+
+In values-only files, assignment names and comments are intentionally visible.
+Each encrypted value is authenticated together with its variable name, so
+renaming a variable without re-encrypting it is detected. This mode protects
+values, not variable names, comments, or the fact that a variable is present.
+Values-only output is not a plain dotenv file; decrypt it before passing it to
+tools that expect ordinary `.env` contents.
+
 The default key is stored under `~/.uag/uag_envsec_key`, or in the OS keyring
 when the selected backend and platform allow it. An explicit `key_path` can be
 passed to `encrypt_text`, `decrypt_text`, `encrypt_file`, `decrypt_file`, and
@@ -47,10 +66,23 @@ plaintext source is retained and existing outputs are not overwritten.
 
 ## CLI
 
-Encrypt a dotenv file to `<path>.sec`:
+By default, `uag_envsec` encrypts only dotenv assignment values; variable names, comments, and blank lines remain visible. Other non-assignment lines are rejected:
 
 ```bash
 uag_envsec .env
+```
+
+This mode adds a comment header. The complete right-hand side is encrypted,
+including quotes, surrounding whitespace, and inline comments. Multiline quoted
+and values ending in an unescaped backslash are rejected rather than partially encrypted.
+`decrypt` detects the format automatically; `add` and `delete` retain it.
+
+Use `--whole-file` to encrypt names, comments, and all other file content as one
+ciphertext, for example when a consumer expects the previous whole-file format.
+For older `uag` releases that require the legacy envelope, also pass `--format-version 0`:
+
+```bash
+uag_envsec .env --whole-file --format-version 0
 ```
 
 Add or update a variable (the value is requested without echo if omitted):

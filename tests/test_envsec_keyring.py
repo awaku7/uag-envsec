@@ -10,10 +10,12 @@ from cryptography.exceptions import InvalidTag
 
 from uag_envsec import (
     UnsupportedCiphertextVersionError,
+    decrypt_env_values,
     decrypt_file,
     detect_format_version,
     decrypt_text,
     encrypt_file,
+    encrypt_env_values,
     encrypt_text,
     inspect_file,
     migrate_file,
@@ -166,6 +168,7 @@ def test_cli_encrypt_can_write_version_one(tmp_path: Path) -> None:
                 str(encrypted_path),
                 "--key-file",
                 str(key_path),
+                "--whole-file",
             ]
         )
         == 0
@@ -221,7 +224,9 @@ def test_encrypt_file_writes_ciphertext_sibling_and_keeps_source(
     plaintext = "UAGENT_TEST=value\nsecond-line\n"
     source_path.write_bytes(plaintext.encode("utf-8"))
 
-    destination = encrypt_file(source_path, key_path=key_path, format_version=1)
+    destination = encrypt_file(
+        source_path, key_path=key_path, format_version=1, values_only=False
+    )
 
     assert destination == tmp_path / ".env.sec"
     assert source_path.read_bytes() == plaintext.encode("utf-8")
@@ -795,3 +800,146 @@ def test_auto_fails_closed_when_keyring_write_times_out(
 
     assert keyring.write_started
     assert not (tmp_path / ".uag" / secret_core.DEFAULT_KEY_FILENAME).exists()
+
+
+@pytest.mark.parametrize("format_version", [0, 1])
+def test_values_only_text_round_trip_preserves_keys_comments_and_format(
+    tmp_path: Path, format_version: int
+) -> None:
+    key_path = tmp_path / "envsec.key"
+    secret_core.ensure_key_file(key_path)
+    plaintext = (
+        "# service credentials\n"
+        "export API_TOKEN = \"top-secret value\"  # inline note\r\n"
+        "EMPTY=\r\n"
+        "PLAIN=visible?\r\n"
+    )
+
+    encrypted = encrypt_env_values(
+        plaintext, key_path=key_path, format_version=format_version
+    )
+
+    assert encrypted.startswith(
+        f"# uag-envsec:values-only:v1;format={format_version}\n"
+    )
+    assert "API_TOKEN" in encrypted
+    assert "service credentials" in encrypted
+    assert "top-secret value" not in encrypted
+    assert "inline note" not in encrypted
+    assert decrypt_env_values(encrypted, key_path=key_path) == plaintext
+
+
+def test_values_only_rejects_multiline_and_mixed_plain_assignments(
+    tmp_path: Path,
+) -> None:
+    key_path = tmp_path / "envsec.key"
+    secret_core.ensure_key_file(key_path)
+
+    with pytest.raises(ValueError, match="Unsupported non-assignment"):
+        encrypt_env_values("plain text that must not leak", key_path=key_path)
+
+    with pytest.raises(ValueError, match="Multiline quoted"):
+        encrypt_env_values('SECRET="first line\nsecond line"', key_path=key_path)
+
+    encrypted = encrypt_env_values("SECRET=hidden\n", key_path=key_path)
+    tampered = encrypted.replace("SECRET=", "OTHER=")
+    with pytest.raises(ValueError, match="does not match"):
+        decrypt_env_values(tampered, key_path=key_path)
+
+    mixed = encrypted + "VISIBLE=not-encrypted\n"
+    with pytest.raises(ValueError, match="Unencrypted assignment"):
+        decrypt_env_values(mixed, key_path=key_path)
+
+
+def test_values_only_file_encrypt_decrypt_inspect_and_cli_add_delete(
+    tmp_path: Path, capsys
+) -> None:
+    key_path = tmp_path / "envsec.key"
+    source_path = tmp_path / ".env"
+    encrypted_path = tmp_path / ".env.sec"
+    secret_core.ensure_key_file(key_path)
+    original = "# keep\nTOKEN=secret\nKEEP=yes\n"
+    source_path.write_text(original, encoding="utf-8", newline="")
+
+    encrypted_path_result = encrypt_file(
+        source_path,
+        key_path=key_path,
+        output_path=encrypted_path,
+    )
+    assert encrypted_path_result == encrypted_path
+    encrypted_content = encrypted_path.read_text(encoding="utf-8")
+    assert "TOKEN=" in encrypted_content and "secret" not in encrypted_content
+    assert source_path.read_text(encoding="utf-8") == original
+    metadata = inspect_file(encrypted_path, key_path=key_path)
+    assert metadata["mode"] == "values-only"
+    assert metadata["encrypted_values"] == 2
+
+    decrypted_path = decrypt_file(
+        encrypted_path, key_path=key_path, output_path=tmp_path / ".env.out"
+    )
+    assert decrypted_path.read_text(encoding="utf-8") == original
+
+    assert envsec_cli.main(
+        ["add", "--file", str(encrypted_path), "--key-file", str(key_path),
+         "--key", "NEW", "--value", "added"]
+    ) == 0
+    capsys.readouterr()
+    updated = decrypt_env_values(
+        encrypted_path.read_text(encoding="utf-8"), key_path=key_path
+    )
+    assert "NEW=added\n" in updated
+
+    assert envsec_cli.main(
+        ["delete", "--file", str(encrypted_path), "--key-file", str(key_path),
+         "--key", "TOKEN"]
+    ) == 0
+    capsys.readouterr()
+    updated = decrypt_env_values(
+        encrypted_path.read_text(encoding="utf-8"), key_path=key_path
+    )
+    assert "TOKEN=" not in updated
+    assert "NEW=added\n" in updated
+
+
+def test_values_only_cli_default_and_file_migration_rekey(
+    tmp_path: Path, capsys
+) -> None:
+    key_path = tmp_path / "old.key"
+    new_key_path = tmp_path / "new.key"
+    source_path = tmp_path / ".env"
+    encrypted_path = tmp_path / ".env.sec"
+    migrated_path = tmp_path / ".env.sec.v0"
+    rekeyed_path = tmp_path / ".env.sec.rekeyed"
+    secret_core.ensure_key_file(key_path)
+    secret_core.ensure_key_file(new_key_path)
+    original = "TOKEN=classified\nPUBLIC=hello\n"
+    source_path.write_text(original, encoding="utf-8")
+
+    assert envsec_cli.main(
+        ["encrypt", str(source_path), "--output", str(encrypted_path),
+         "--key-file", str(key_path)]
+    ) == 0
+    capsys.readouterr()
+    assert inspect_file(encrypted_path, key_path=key_path)["mode"] == "values-only"
+
+    assert migrate_file(
+        encrypted_path,
+        target_version=0,
+        key_path=key_path,
+        output_path=migrated_path,
+    ) == migrated_path
+    migrated_info = inspect_file(migrated_path, key_path=key_path)
+    assert migrated_info["format_version"] == 0
+    assert decrypt_env_values(
+        migrated_path.read_text(encoding="utf-8"), key_path=key_path
+    ) == original
+
+    assert rekey_file(
+        migrated_path,
+        new_key_path=new_key_path,
+        old_key_path=key_path,
+        output_path=rekeyed_path,
+    ) == rekeyed_path
+    assert decrypt_env_values(
+        rekeyed_path.read_text(encoding="utf-8"), key_path=new_key_path
+    ) == original

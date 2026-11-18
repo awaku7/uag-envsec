@@ -14,10 +14,12 @@ from .secret_core import (
     CURRENT_FORMAT_VERSION,
     DEFAULT_SEC_SUFFIX,
     LEGACY_FORMAT_VERSION,
+    decrypt_env_values,
     decrypt_file,
     decrypt_text,
     detect_format_version,
     default_key_path,
+    encrypt_env_values,
     encrypt_text,
     encrypt_file,
     ensure_key_file,
@@ -35,7 +37,7 @@ _ENV_KEY_RE = re.compile(
 def _build_encrypt_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="uag_envsec",
-        description="Encrypt a .env file into .env.sec.",
+        description="Encrypt a .env file into .env.sec (values-only by default).",
     )
     parser.add_argument(
         "path",
@@ -58,6 +60,20 @@ def _build_encrypt_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite the output file if it already exists",
     )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--values-only",
+        dest="values_only",
+        action="store_true",
+        help="Encrypt only dotenv assignment values (the default)",
+    )
+    mode_group.add_argument(
+        "--whole-file",
+        dest="values_only",
+        action="store_false",
+        help="Encrypt the entire file, including variable names and comments",
+    )
+    parser.set_defaults(values_only=True)
     parser.add_argument(
         "--format-version",
         type=int,
@@ -382,6 +398,7 @@ def _run_encrypt(args: argparse.Namespace) -> int:
             output_path=out_path,
             format_version=args.format_version,
             overwrite=args.force,
+            values_only=args.values_only,
         )
     except Exception as exc:
         print(f"Failed to encrypt {src_path}: {exc}", file=sys.stderr)
@@ -437,6 +454,9 @@ def _run_inspect(args: argparse.Namespace) -> int:
     print(f"ciphertext_bytes: {result['ciphertext_bytes']}")
     print(f"authenticated: {'yes' if result['authenticated'] else 'no'}")
     print(f"decryptable: {'yes' if result['decryptable'] else 'no'}")
+    if result.get("mode") == "values-only":
+        print("mode: values-only")
+        print(f"encrypted_values: {result['encrypted_values']}")
     return 0
 
 
@@ -470,17 +490,27 @@ def _run_add(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        encrypted_input = enc_path.read_text(encoding="utf-8").strip()
-        detect_format_version(encrypted_input)
-        plaintext = decrypt_text(encrypted_input, key_path=key_file)
+        encrypted_input = enc_path.read_text(encoding="utf-8")
+        values_only = encrypted_input.startswith("# uag-envsec:values-only:")
+        if values_only:
+            plaintext = decrypt_env_values(encrypted_input, key_path=key_file)
+        else:
+            encrypted_input = encrypted_input.strip()
+            detect_format_version(encrypted_input)
+            plaintext = decrypt_text(encrypted_input, key_path=key_file)
     except Exception as exc:
         print(f"Failed to decrypt {enc_path}: {exc}", file=sys.stderr)
         return 1
 
     updated = _upsert_env_text(plaintext, key, value)
+    encrypted_output = (
+        encrypt_env_values(updated, key_path=key_file, format_version=args.format_version)
+        if values_only
+        else encrypt_text(updated, key_path=key_file, format_version=args.format_version)
+    )
     _write_text_atomic(
         out_path,
-        encrypt_text(updated, key_path=key_file, format_version=args.format_version),
+        encrypted_output,
         overwrite=args.force or out_path.resolve() == enc_path.resolve(),
     )
     print(str(out_path))
@@ -514,9 +544,14 @@ def _run_delete(args: argparse.Namespace) -> int:
     ensure_key_file(key_file)
 
     try:
-        encrypted_input = enc_path.read_text(encoding="utf-8").strip()
-        detect_format_version(encrypted_input)
-        plaintext = decrypt_text(encrypted_input, key_path=key_file)
+        encrypted_input = enc_path.read_text(encoding="utf-8")
+        values_only = encrypted_input.startswith("# uag-envsec:values-only:")
+        if values_only:
+            plaintext = decrypt_env_values(encrypted_input, key_path=key_file)
+        else:
+            encrypted_input = encrypted_input.strip()
+            detect_format_version(encrypted_input)
+            plaintext = decrypt_text(encrypted_input, key_path=key_file)
     except Exception as exc:
         print(f"Failed to decrypt {enc_path}: {exc}", file=sys.stderr)
         return 1
@@ -531,9 +566,14 @@ def _run_delete(args: argparse.Namespace) -> int:
         return 1
 
     try:
+        encrypted_output = (
+            encrypt_env_values(updated, key_path=key_file, format_version=args.format_version)
+            if values_only
+            else encrypt_text(updated, key_path=key_file, format_version=args.format_version)
+        )
         _write_text_atomic(
             out_path,
-            encrypt_text(updated, key_path=key_file, format_version=args.format_version),
+            encrypted_output,
             overwrite=args.force or out_path.resolve() == enc_path.resolve(),
         )
     except Exception as exc:

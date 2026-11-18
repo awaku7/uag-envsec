@@ -35,6 +35,21 @@ Detect the input format, authenticate and decrypt it, then return plaintext.
 Versionless data is interpreted as version 0. Authentication failures from
 AES-GCM are raised; plaintext is never printed or written by this function.
 
+### `encrypt_env_values(plaintext, *, key_path=None, format_version=1) -> str`
+
+Encrypt assignment right-hand sides in dotenv text, leaving variable names,
+comments, and blank lines visible. Other non-assignment lines are rejected. The output starts with a `# uag-envsec` comment
+header that identifies the representation. Each encrypted value is bound to
+its variable name; an edited name will fail authentication checks. Raw
+right-hand sides (including quotes, whitespace, and inline comments) are
+encrypted as-is. Multiline quoted values and values ending in an unescaped backslash are rejected.
+
+### `decrypt_env_values(ciphertext, *, key_path=None) -> str`
+
+Decrypt a values-only representation and restore its original text. The header,
+all assignment values, and the association between each value and its variable
+name are validated before returning plaintext.
+
 ### `detect_format_version(ciphertext) -> int`
 
 Return `0` for unversioned legacy data and `1` for a supported version-1
@@ -43,21 +58,25 @@ versions raise `UnsupportedCiphertextVersionError`.
 
 ## File API
 
-### `encrypt_file(source_path, *, key_path=None, output_path=None, format_version=1, overwrite=False) -> pathlib.Path`
+### `encrypt_file(source_path, *, key_path=None, output_path=None, format_version=1, overwrite=False, values_only=True) -> pathlib.Path`
 
 Encrypt a UTF-8 text file. The default output is `<source>.sec`. The plaintext
 source is not modified. Output is written atomically through a private
 same-directory temporary file; an existing output is refused unless
-`overwrite=True`.
+`overwrite=True`. By default, only dotenv assignment values are encrypted;
+keys, comments, and blank lines remain visible; other lines are rejected. Set `values_only=False` to encrypt
+the entire file as one ciphertext.
 
 ### `decrypt_file(source_path, *, key_path=None, output_path=None, overwrite=False) -> pathlib.Path`
 
 Decrypt an encrypted file. The default output is `<source>.decrypted`. The
-encrypted source is not modified. Plaintext is held in memory and written
+function automatically detects values-only files from their header as well as
+the regular whole-file ciphertext format. The encrypted source is not modified.
+Plaintext is held in memory and written
 atomically; on POSIX the output file is owner-only. Existing outputs require
 `overwrite=True`.
 
-### `inspect_file(source_path, *, key_path=None) -> dict[str, int | bool]`
+### `inspect_file(source_path, *, key_path=None) -> dict[str, int | bool | str]`
 
 Check format and authenticated decryptability without returning or printing
 plaintext. The returned dictionary contains:
@@ -66,6 +85,9 @@ plaintext. The returned dictionary contains:
 - `ciphertext_bytes`: size of the source file in bytes.
 - `authenticated`: `True` when the AES-GCM authentication check succeeds.
 - `decryptable`: `True` when the file can be decrypted with the selected key.
+
+For a values-only file the result additionally includes `mode: "values-only"`
+and `encrypted_values`, the number of authenticated variable assignments.
 
 Invalid ciphertext, an unavailable key, or an unsupported format raises an
 exception. The plaintext is decrypted in memory for verification and discarded.

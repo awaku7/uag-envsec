@@ -7,6 +7,8 @@ All notable changes to `uag-envsec` are documented here.
 ### Added
 
 - Standalone `uag-envsec` Python package and `uag_envsec` CLI.
+- Values-only dotenv encryption by default, with automatic decryption and
+  authenticated variable-name binding; `--whole-file` preserves the previous mode.
 - Version-1 ciphertext envelopes, with versionless legacy ciphertext read as v0.
 - File encryption/decryption and ciphertext inspection APIs and CLI commands.
 - File and text migration between supported envelope versions.
