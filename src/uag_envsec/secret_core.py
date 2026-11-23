@@ -511,6 +511,8 @@ def _decrypt_text_with_key(enc_b64: str, master_key: bytes) -> str:
 
 
 def decrypt_text(enc_b64: str, *, key_path: str | Path | None = None) -> str:
+    if _values_only_header(enc_b64) is not None:
+        return decrypt_env_values(enc_b64, key_path=key_path)
     return _decrypt_text_with_key(enc_b64, load_key(key_path))
 
 

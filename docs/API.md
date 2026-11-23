@@ -32,7 +32,9 @@ no usable key is available or the format version is unsupported.
 ### `decrypt_text(ciphertext, *, key_path=None) -> str`
 
 Detect the input format, authenticate and decrypt it, then return plaintext.
-Versionless data is interpreted as version 0. Authentication failures from
+Versionless data is interpreted as version 0. Values-only dotenv text is
+detected by its `# uag-envsec:values-only:` header and decrypted the same
+way. Authentication failures from
 AES-GCM are raised; plaintext is never printed or written by this function.
 
 ### `encrypt_env_values(plaintext, *, key_path=None, format_version=1) -> str`
