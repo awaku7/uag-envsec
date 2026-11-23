@@ -1,6 +1,6 @@
 # uag-envsec Specification
 
-**Status:** Current behavior specification for `uag-envsec` 0.1.1\
+**Status:** Current behavior specification for `uag-envsec` 0.1.2\
 **Normative source:** This document describes the released behavior. If behavior changes, update this document, the API reference, and tests in the same change.
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** express requirements for conforming implementations of this version.
@@ -21,7 +21,7 @@ The public Python API is the set exported by `uag_envsec.__init__`. The CLI and 
 
 ## 2. Functional requirements
 
-An implementation conforming to version 0.1.1:
+An implementation conforming to version 0.1.2:
 
 1. MUST encrypt and authenticate text using AES-GCM and MUST reject ciphertext that cannot be authenticated with the selected key.
 
@@ -87,7 +87,10 @@ validation. Comments and blank lines remain unchanged; other non-assignment line
 right-hand side is encrypted as-is, so quotes, whitespace, and inline comments
 after `=` are encrypted too. Multiline quoted values and values ending in an unescaped backslash are
 rejected. A values-only file with an assignment lacking its ciphertext
-marker MUST be rejected during decryption/inspection.
+marker MUST be rejected during decryption/inspection. `decrypt_text` MUST
+detect the values-only header and decrypt such input automatically, so
+consumers written for whole-file ciphertext can read values-only files
+without changes.
 
 ## 4. Key management
 
@@ -164,6 +167,6 @@ The API MUST NOT log or print key bytes. `decrypt_text()` returns plaintext to i
 
 ## 9. Compatibility and conformance
 
-Version 0.1.1 MUST remain able to read supported v0 and v1 envelopes. Version 0 output is the compatibility format for older `uag` releases; version 1 is the default for newly written ciphertext. Any future incompatible envelope MUST use a new explicit version and MUST NOT be silently interpreted as v0.
+Version 0.1.2 MUST remain able to read supported v0 and v1 envelopes. Version 0 output is the compatibility format for older `uag` releases; version 1 is the default for newly written ciphertext. Any future incompatible envelope MUST use a new explicit version and MUST NOT be silently interpreted as v0.
 
 A release conforms to this specification when its exported API and CLI behavior match this document and the automated tests cover the cryptographic formats, key-backend failure behavior, source preservation, overwrite protections, and supported migration paths. The package's CI additionally builds and validates wheel and source distributions.

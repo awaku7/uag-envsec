@@ -829,6 +829,31 @@ def test_values_only_text_round_trip_preserves_keys_comments_and_format(
     assert decrypt_env_values(encrypted, key_path=key_path) == plaintext
 
 
+@pytest.mark.parametrize("format_version", [0, 1])
+def test_decrypt_text_auto_detects_values_only(
+    tmp_path: Path, format_version: int
+) -> None:
+    key_path = tmp_path / "envsec.key"
+    secret_core.ensure_key_file(key_path)
+    plaintext = "API_TOKEN=<redacted>\nPLAIN=visible?\n"
+
+    encrypted = encrypt_env_values(
+        plaintext, key_path=key_path, format_version=format_version
+    )
+
+    assert decrypt_text(encrypted, key_path=key_path) == plaintext
+
+
+def test_decrypt_text_rejects_malformed_values_only_header(
+    tmp_path: Path,
+) -> None:
+    key_path = tmp_path / "envsec.key"
+    secret_core.ensure_key_file(key_path)
+
+    with pytest.raises(ValueError, match="Malformed values-only"):
+        decrypt_text("# uag-envsec:values-only:v9\nA=1\n", key_path=key_path)
+
+
 def test_values_only_rejects_multiline_and_mixed_plain_assignments(
     tmp_path: Path,
 ) -> None:
